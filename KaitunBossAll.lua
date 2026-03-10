@@ -14,7 +14,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local Plr = Players.LocalPlayer
 local PlaceId = game.PlaceId
-local JobId = game.JobId
+-- JobId đọc động mỗi lần để không bị stale sau teleport
 
 -- ─── World Detection ───
 local World1 = (PlaceId == 2753915549 or PlaceId == 85211729168715)
@@ -337,56 +337,77 @@ local function scanAllLiveBosses()
     return found
 end
 
--- ─── Server Hop: không trùng, 8-10 người, teleport ngay ───
+-- ─── Server Hop: không trùng, 8-10 người ───
+-- _visitedServers lưu toàn bộ server ID đã từng teleport vào
+-- Dùng game.JobId động (không dùng biến cũ) để luôn đúng sau mỗi teleport
 local _visitedServers = {}
-
--- Lấy danh sách server hợp lệ (8-10 người, chưa vào, chưa đầy)
-local function getValidServers()
-    local servers = {}
-    local cursor = ""
-    for _page = 1, 5 do
-        local url = "https://games.roblox.com/v1/games/" .. PlaceId
-            .. "/servers/Public?sortOrder=Asc&limit=100"
-            .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
-        local ok, data = pcall(function()
-            return HttpService:JSONDecode(game:HttpGet(url))
-        end)
-        if not ok or not data or not data.data then break end
-        for _, s in pairs(data.data) do
-            local playing = tonumber(s.playing) or 0
-            local maxP    = tonumber(s.maxPlayers) or 0
-            if playing >= 8 and playing <= 10
-                and playing < maxP
-                and s.id ~= JobId
-                and not _visitedServers[s.id]
-            then
-                table.insert(servers, s.id)
-            end
-        end
-        if #servers >= 10 then break end
-        if data.nextPageCursor and data.nextPageCursor ~= "" and data.nextPageCursor ~= "null" then
-            cursor = data.nextPageCursor
-        else
-            break
-        end
-    end
-    return servers
-end
 
 local function Hop()
     pcall(function()
-        _visitedServers[JobId] = true
-        local servers = getValidServers()
-        if #servers == 0 then
-            -- Không tìm được server hợp lệ → reset lịch sử, lấy lại
-            _visitedServers = { [JobId] = true }
-            servers = getValidServers()
+        -- Đánh dấu server HIỆN TẠI (đọc động, không dùng biến cũ)
+        local currentJob = tostring(game.JobId)
+        _visitedServers[currentJob] = true
+
+        local picked = nil
+        local resetDone = false
+
+        ::SEARCH::
+        local cursor = ""
+        local candidates = {}
+
+        for _page = 1, 5 do
+            local url = "https://games.roblox.com/v1/games/" .. PlaceId
+                .. "/servers/Public?sortOrder=Desc&limit=100"
+                .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
+
+            local ok, data = pcall(function()
+                return HttpService:JSONDecode(game:HttpGet(url))
+            end)
+            if not ok or not data or not data.data then break end
+
+            for _, s in pairs(data.data) do
+                local id      = tostring(s.id)
+                local playing = tonumber(s.playing) or 0
+                local maxP    = tonumber(s.maxPlayers) or 0
+
+                -- Điều kiện: 8-10 người, còn chỗ, chưa từng vào
+                if playing >= 8 and playing <= 10
+                    and playing < maxP
+                    and id ~= currentJob
+                    and not _visitedServers[id]
+                then
+                    table.insert(candidates, id)
+                end
+            end
+
+            if #candidates >= 5 then break end
+
+            if data.nextPageCursor
+                and data.nextPageCursor ~= ""
+                and data.nextPageCursor ~= "null"
+                and data.nextPageCursor ~= nil
+            then
+                cursor = tostring(data.nextPageCursor)
+            else
+                break
+            end
         end
-        if #servers > 0 then
-            local pick = servers[math.random(1, #servers)]
-            _visitedServers[pick] = true
-            TeleportService:TeleportToPlaceInstance(PlaceId, pick, Plr)
+
+        if #candidates > 0 then
+            -- Chọn ngẫu nhiên để không bị cùng 1 server
+            picked = candidates[math.random(1, #candidates)]
+        elseif not resetDone then
+            -- Hết server chưa thăm → xóa lịch sử và tìm lại 1 lần
+            resetDone = true
+            _visitedServers = { [currentJob] = true }
+            goto SEARCH
+        end
+
+        if picked then
+            _visitedServers[tostring(picked)] = true
+            TeleportService:TeleportToPlaceInstance(PlaceId, tostring(picked), Plr)
         else
+            -- Không tìm được gì cả → teleport random
             TeleportService:Teleport(PlaceId, Plr)
         end
     end)
