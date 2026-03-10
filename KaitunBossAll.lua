@@ -337,57 +337,56 @@ local function scanAllLiveBosses()
     return found
 end
 
--- ─── Server Hop: không trùng, chỉ 8-10 người ───
-local _visitedServers = {}  -- lưu server đã từng vào để không bị trùng
+-- ─── Server Hop: không trùng, 8-10 người, teleport ngay ───
+local _visitedServers = {}
+
+-- Lấy danh sách server hợp lệ (8-10 người, chưa vào, chưa đầy)
+local function getValidServers()
+    local servers = {}
+    local cursor = ""
+    for _page = 1, 5 do
+        local url = "https://games.roblox.com/v1/games/" .. PlaceId
+            .. "/servers/Public?sortOrder=Asc&limit=100"
+            .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
+        local ok, data = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+        if not ok or not data or not data.data then break end
+        for _, s in pairs(data.data) do
+            local playing = tonumber(s.playing) or 0
+            local maxP    = tonumber(s.maxPlayers) or 0
+            if playing >= 8 and playing <= 10
+                and playing < maxP
+                and s.id ~= JobId
+                and not _visitedServers[s.id]
+            then
+                table.insert(servers, s.id)
+            end
+        end
+        if #servers >= 10 then break end
+        if data.nextPageCursor and data.nextPageCursor ~= "" and data.nextPageCursor ~= "null" then
+            cursor = data.nextPageCursor
+        else
+            break
+        end
+    end
+    return servers
+end
 
 local function Hop()
     pcall(function()
-        -- Đánh dấu server hiện tại là đã thăm
         _visitedServers[JobId] = true
-
-        local servers = {}
-        local cursor = ""
-
-        -- Quét tối đa 3 trang để tìm đủ server
-        for _page = 1, 3 do
-            local url = "https://games.roblox.com/v1/games/" .. PlaceId
-                .. "/servers/Public?sortOrder=Asc&limit=100"
-                .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
-
-            local ok, data = pcall(function()
-                return HttpService:JSONDecode(game:HttpGet(url))
-            end)
-            if not ok or not data or not data.data then break end
-
-            for _, s in pairs(data.data) do
-                local playing = tonumber(s.playing) or 0
-                local maxP    = tonumber(s.maxPlayers) or 0
-                -- Chỉ lấy server 8-10 người, chưa đầy, và chưa từng vào
-                if playing >= 8 and playing <= 10
-                    and playing < maxP
-                    and not _visitedServers[s.id]
-                then
-                    table.insert(servers, s.id)
-                end
-            end
-
-            if #servers >= 5 then break end  -- đủ lựa chọn rồi dừng
-
-            if data.nextPageCursor and data.nextPageCursor ~= "" and data.nextPageCursor ~= "null" then
-                cursor = data.nextPageCursor
-            else
-                break
-            end
+        local servers = getValidServers()
+        if #servers == 0 then
+            -- Không tìm được server hợp lệ → reset lịch sử, lấy lại
+            _visitedServers = { [JobId] = true }
+            servers = getValidServers()
         end
-
         if #servers > 0 then
-            -- Chọn ngẫu nhiên trong danh sách để tránh luôn vào 1 server
             local pick = servers[math.random(1, #servers)]
-            _visitedServers[pick] = true  -- đánh dấu trước khi teleport
+            _visitedServers[pick] = true
             TeleportService:TeleportToPlaceInstance(PlaceId, pick, Plr)
         else
-            -- Không tìm được → reset lịch sử và thử lại (trừ server hiện tại)
-            _visitedServers = { [JobId] = true }
             TeleportService:Teleport(PlaceId, Plr)
         end
     end)
@@ -526,6 +525,27 @@ task.spawn(function()
     -- Bật buso ngay khi start
     AutoHaki()
 
+    -- Quét ngay khi vào server: nếu không có boss nào → hop tiếp ngay
+    task.wait(5) -- đợi server load xong
+    pcall(function()
+        local bossList = getBossList()
+        local firstScan = scanAllLiveBosses()
+        local anyBossFound = false
+        for _, bossName in ipairs(bossList) do
+            if not SkipBoss[bossName] and (firstScan[bossName] ~= nil) then
+                anyBossFound = true
+                break
+            end
+        end
+        if not anyBossFound then
+            currentBossName = "No Boss In Server! Hopping..."
+            task.wait(0.5)
+            killedBosses = {}
+            Hop()
+            task.wait(15)
+        end
+    end)
+
     while _G.KaitunAllBoss do
         task.wait(0.3)
         pcall(function()
@@ -619,39 +639,24 @@ task.spawn(function()
                 end
             end
 
-            -- Kiểm tra xem có boss nào spawn không
-            local anySpawned = false
+            -- Sau khi đi qua hết list: kiểm tra còn boss chưa kill không
+            local hasRemaining = false
             for _, bossName in ipairs(bossList) do
                 if not SkipBoss[bossName] and not killedBosses[bossName] then
-                    local alive, _ = isBossInWorkspace(bossName)
-                    if alive then anySpawned = true break end
+                    hasRemaining = true
+                    break
                 end
             end
 
-            -- Không có boss nào spawn → đổi server ngay
-            if not anySpawned then
-                -- Kiểm tra còn boss chưa kill không
-                local hasRemaining = false
-                for _, bossName in ipairs(bossList) do
-                    if not SkipBoss[bossName] and not killedBosses[bossName] then
-                        hasRemaining = true break
-                    end
-                end
-                if hasRemaining then
-                    currentBossName = "No Boss Spawned! Hopping..."
-                    task.wait(1)
-                    killedBosses = {}
-                    Hop()
-                    task.wait(12)
-                else
-                    -- Tất cả đã kill hết
-                    currentBossName = "All Boss Done! Hopping..."
-                    task.wait(1)
-                    killedBosses = {}
-                    Hop()
-                    task.wait(12)
-                end
+            if not hasRemaining then
+                -- Kill hết rồi → hop
+                currentBossName = "All Boss Done! Hopping..."
+                killedBosses = {}
+                task.wait(0.5)
+                Hop()
+                task.wait(15)
             end
+            -- Nếu còn boss chưa kill nhưng chưa spawn → loop lại quét tiếp (không hop vội)
         end)
     end
 end)
